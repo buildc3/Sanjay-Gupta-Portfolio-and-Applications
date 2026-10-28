@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>My Data — Sanjay Gupta</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/css/style.css"></head><body>
+<main class="wrap">
+<div id="lock" class="card">
+  <h3>My Data</h3><p class="hint">Contains personal data (PAN, DOB). Enter the passcode.</p>
+  <form id="lockForm" style="display:grid;gap:10px;margin-top:12px">
+    <input id="pass" type="password" autocomplete="current-password" placeholder="Passcode" required>
+    <button class="btn">Unlock</button></form>
+</div>
+<div id="app" class="hide">
+  <h2 style="margin-top:24px">My Data</h2>
+  <p class="hint">Everything stored by the Partner Management System. <a href="/applications/partner-management">Add or edit records</a></p>
+  <div class="bar"><input id="q" placeholder="Filter every table…"><button class="btn ghost" id="refresh">Refresh</button></div>
+  <div id="kpis" class="kpis"></div>
+  <div id="out"></div>
+</div>
+</main>
+<div id="toast" class="toast hide"></div>
+<script src="/js/data.js" type="module"></script>
+<script src="/js/nav.js"></script>
+</body></html>

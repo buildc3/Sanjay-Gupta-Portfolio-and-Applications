@@ -1,0 +1,26 @@
+[build]
+  publish = "public"
+  functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/applications/partner-management"
+  to = "/partner-management.html"
+  status = 200
+
+[[redirects]]
+  from = "/applications"
+  to = "/applications.html"
+  status = 200
+
+[[redirects]]
+  from = "/my-data"
+  to = "/my-data.html"
+  status = 200
