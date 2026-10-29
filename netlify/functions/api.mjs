@@ -1,4 +1,6 @@
 import { getStore } from "@netlify/blobs";
+import { createClient } from "@supabase/supabase-js";
+import { createHmac, timingSafeEqual } from "node:crypto";
 
 // ---- Lists (from the Excel "Lists" sheet) ----
 const PRODUCTS = ["Insurance", "Mutual Fund", "Corporate FD", "Loan", "PMS", "AIF", "54EC Capital Gain Bonds", "Other"];
@@ -24,6 +26,73 @@ const COLLECTIONS = {
     fields: ["product", "company", "rate", "effectiveFrom", "effectiveTo", "notes"],
   },
 };
+
+// ---- Documents: files live in a private Supabase Storage bucket, their list lives on the record ----
+const DOC_BUCKET = process.env.SUPABASE_BUCKET || "partner-documents";
+const DOC_MAX_BYTES = 4 * 1024 * 1024; // Netlify function request bodies are capped at ~6 MB (less once base64 encoded)
+const DOC_TYPES = ["application/pdf", "image/jpeg", "image/png", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
+const UPLOAD_WINDOW_MS = 15 * 60 * 1000; // how long a visitor without the passcode may attach files to a record they just created
+
+let supa;
+function supabase() {
+  if (!process.env.SUPABASE_URL || !process.env.SUPABASE_SERVICE_ROLE_KEY) return null;
+  return (supa ??= createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } }));
+}
+
+// Token handed back on a public create so that visitor can upload files for that one record only
+const uploadToken = (name, rec) => createHmac("sha256", process.env.APP_PASSCODE).update(`${name}/${rec.id}/${rec.createdAt}`).digest("hex");
+function validUploadToken(name, rec, token) {
+  if (!token || Date.now() - Date.parse(rec.createdAt) > UPLOAD_WINDOW_MS) return false;
+  const a = Buffer.from(uploadToken(name, rec)), b = Buffer.from(String(token));
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+async function handleDocuments(req, store, authed, [kind, id, docId]) {
+  if (!COLLECTIONS[kind] || kind === "rates" || !id) return json({ error: "Not found" }, 404);
+  const sb = supabase();
+  if (!sb) return json({ error: "Document storage not configured: SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY missing" }, 500);
+  const key = `${kind}/${id}`;
+  const rec = await store.get(key, { type: "json" });
+  if (!rec) return json({ error: "Not found" }, 404);
+  const docs = rec.docs || [];
+
+  if (req.method === "POST") {
+    if (!authed && !validUploadToken(kind, rec, req.headers.get("x-upload-token"))) return json({ error: "Passcode required" }, 401);
+    const type = (req.headers.get("content-type") || "").split(";")[0];
+    if (!DOC_TYPES.includes(type)) return json({ error: "Only PDF, JPG, PNG or Word files are allowed" }, 400);
+    const body = new Uint8Array(await req.arrayBuffer());
+    if (!body.length) return json({ error: "Empty file" }, 400);
+    if (body.length > DOC_MAX_BYTES) return json({ error: "File is larger than 4 MB" }, 413);
+    let fileName = req.headers.get("x-filename") || "document";
+    try { fileName = decodeURIComponent(fileName); } catch {}
+    fileName = fileName.replace(/[\\/\x00-\x1f]/g, "_").slice(0, 120) || "document";
+    const doc = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: fileName, type, size: body.length, uploadedAt: new Date().toISOString() };
+    doc.path = `${kind}/${id}/${doc.id}-${fileName.replace(/[^\w.-]+/g, "_")}`;
+    const { error } = await sb.storage.from(DOC_BUCKET).upload(doc.path, body, { contentType: type, upsert: false });
+    if (error) return json({ error: "Upload failed: " + error.message }, 502);
+    // Re-read so a second file uploaded in parallel is not lost
+    const fresh = (await store.get(key, { type: "json" })) || rec;
+    await store.setJSON(key, { ...fresh, docs: [...(fresh.docs || []), doc] });
+    return json({ ok: true, doc: authed ? doc : { name: doc.name } });
+  }
+
+  if (!authed) return json({ error: "Passcode required" }, 401);
+  const doc = docs.find((d) => d.id === docId);
+  if (!doc) return json({ error: "Document not found" }, 404);
+
+  if (req.method === "GET") {
+    const { data, error } = await sb.storage.from(DOC_BUCKET).createSignedUrl(doc.path, 60, { download: doc.name });
+    if (error) return json({ error: error.message }, 502);
+    return json({ url: data.signedUrl });
+  }
+  if (req.method === "DELETE") {
+    const { error } = await sb.storage.from(DOC_BUCKET).remove([doc.path]);
+    if (error) return json({ error: error.message }, 502);
+    await store.setJSON(key, { ...rec, docs: docs.filter((d) => d.id !== docId) });
+    return json({ ok: true });
+  }
+  return json({ error: "Method not allowed" }, 405);
+}
 
 const json = (body, status = 200) =>
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", "cache-control": "no-store" } });
@@ -110,6 +179,8 @@ export default async (req) => {
 
   // Without the passcode a visitor may only ADD partners and business logins. Reading, editing,
   // deleting and rate changes all need it, and the response reveals nothing about stored data.
+  // Uploading documents is also allowed with the upload token returned by that public create.
+  if (name === "documents") return handleDocuments(req, store, authed, parts.slice(1));
   const publicCreate = req.method === "POST" && (name === "partners" || name === "businesses");
   if (!authed && !publicCreate) return json({ error: "Passcode required" }, 401);
 
@@ -129,6 +200,8 @@ export default async (req) => {
   const data = await loadAll(store);
 
   if (req.method === "DELETE" && id) {
+    const docs = data[name].find((r) => r.id === id)?.docs || [];
+    if (docs.length) await supabase()?.storage.from(DOC_BUCKET).remove(docs.map((d) => d.path));
     await store.delete(`${name}/${id}`);
     const sheets = await mirror({ sheet: def.sheet, action: "delete", id });
     return json({ ok: true, sheets });
@@ -148,13 +221,14 @@ export default async (req) => {
       if (!existing) return json({ error: "Not found" }, 404);
       rec.id = id;
       rec.createdAt = existing.createdAt;
+      if (existing.docs) rec.docs = existing.docs;
     }
     rec.updatedAt = new Date().toISOString();
     await store.setJSON(`${name}/${rec.id}`, rec);
 
     const forSheet = name === "businesses" ? enrichBusiness(rec, data.partners, data.rates) : rec;
     const sheets = await mirror({ sheet: def.sheet, action: "upsert", record: forSheet });
-    if (!authed) return json({ ok: true, record: { id: rec.id }, sheets: { ok: sheets.ok, skipped: sheets.skipped } });
+    if (!authed) return json({ ok: true, record: { id: rec.id }, uploadToken: uploadToken(name, rec), sheets: { ok: sheets.ok, skipped: sheets.skipped } });
     return json({ ok: true, record: forSheet, sheets });
   }
 

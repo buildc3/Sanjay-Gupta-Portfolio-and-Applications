@@ -73,10 +73,38 @@ function table(cols, rows, actions) {
     .map((r) => `<tr>${cols.map((c) => `<td class="${c.n ? "n" : ""}">${c.f ? c.f(r) : esc(r[c.k])}</td>`).join("")}${actions ? `<td>${actions(r)}</td>` : ""}</tr>`)
     .join("")}</tbody></table></div>`;
 }
+// ---------- Documents (stored in a private Supabase Storage bucket via /api/documents) ----------
+const DOC_MAX_MB = 4;
+const docLinks = (kind, r) => (r.docs || []).map((d) => `<a href="#" data-doc="${kind}:${esc(r.id)}:${esc(d.id)}">${esc(d.name)}</a>`).join("<br>");
+// No name attribute on the file input, so files stay out of the JSON form body and are uploaded separately after save
+const uploadField = (kind, e) => `<label class="wide">Upload Documents<input type="file" class="docUpload" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"><span class="hint">PDF, JPG, PNG or Word files, up to ${DOC_MAX_MB} MB each.</span></label>
+  ${e.docs?.length ? `<div class="wide" style="grid-column:1/-1"><small class="hint">Uploaded documents</small>${e.docs.map((d) => `<div>${docLinks(kind, { id: e.id, docs: [d] })} <button type="button" class="btn danger sm" data-deldoc="${kind}:${esc(e.id)}:${esc(d.id)}">Remove</button></div>`).join("")}</div>` : ""}`;
+
+async function uploadDocs(kind, id, files, token) {
+  const failed = [];
+  for (const file of files) {
+    const res = await fetch(`/api/documents/${kind}/${id}`, {
+      method: "POST", body: file,
+      headers: { "content-type": file.type || "application/octet-stream", "x-filename": encodeURIComponent(file.name), ...(pass ? { "x-passcode": pass } : {}), ...(token ? { "x-upload-token": token } : {}) },
+    });
+    if (!res.ok) failed.push(`${file.name} (${(await res.json().catch(() => ({}))).error || "upload failed"})`);
+  }
+  return failed;
+}
 const rowBtns = (kind) => (r) => `<button class="btn ghost sm" data-edit="${kind}:${esc(r.id)}">Edit</button> <button class="btn danger sm" data-del="${kind}:${esc(r.id)}">Delete</button>`;
 
 document.addEventListener("click", async (e) => {
-  const ed = e.target.dataset?.edit, del = e.target.dataset?.del;
+  const ed = e.target.dataset?.edit, del = e.target.dataset?.del, doc = e.target.dataset?.doc, delDoc = e.target.dataset?.deldoc;
+  if (doc) {
+    e.preventDefault(); const [kind, id, docId] = doc.split(":");
+    const win = window.open("", "_blank"); // opened before the await so popup blockers allow it
+    try { const r = await api(`documents/${kind}/${id}/${docId}`); if (win) win.location = r.url; else location.href = r.url; } catch (err) { win?.close(); toast(err.message, true); }
+  }
+  if (delDoc) {
+    const [kind, id, docId] = delDoc.split(":");
+    if (!confirm("Remove this document? It is deleted from storage.")) return;
+    try { await api(`documents/${kind}/${id}/${docId}`, "DELETE"); await load(); render(); toast("Document removed"); } catch (err) { toast(err.message, true); }
+  }
   if (ed) { const [kind, id] = ed.split(":"); editing = { kind, id }; tab = { partners: "addPartner", businesses: "addBusiness", rates: "rates" }[kind]; render(); scrollTo(0, 0); }
   if (del) {
     const [kind, id] = del.split(":");
@@ -100,13 +128,18 @@ function bindForm(v, kind, defaults) {
   $("form.f", v).onsubmit = async (e) => {
     e.preventDefault();
     const body = Object.fromEntries(new FormData(e.target));
+    const files = [...($(".docUpload", e.target)?.files || [])];
+    const big = files.find((x) => x.size > DOC_MAX_MB * 1024 * 1024);
+    if (big) return toast(`${big.name} is larger than ${DOC_MAX_MB} MB`, true);
     if (body.rate !== undefined) body.rate = body.rate === "" ? "" : Number(body.rate) / 100; // % -> decimal
     const btn = $("button.btn", e.target); btn.disabled = true;
     try {
       const r = editing ? await api(`${kind}/${editing.id}`, "PUT", body) : await api(kind, "POST", body);
+      const failed = files.length ? await uploadDocs(kind, r.record.id, files, r.uploadToken) : [];
       if (D) await load();
       const wasEdit = !!editing; editing = null; render();
       sheetNote(r.sheets, wasEdit ? `Updated ${r.record.id}` : `Saved ${r.record.id}`);
+      if (failed.length) toast(`Saved ${r.record.id}, but these documents did not upload: ${failed.join(", ")}`, true);
     } catch (err) { toast(err.message, true); btn.disabled = false; }
   };
   $("#cancel", v)?.addEventListener("click", () => { editing = null; render(); });
@@ -139,6 +172,7 @@ function addPartner(v) {
     <label>Follow-up Date<input name="followUp" type="date" value="${f("followUp")}"></label>
     <label class="wide">Address<input name="address" value="${f("address")}"></label>
     <label class="wide">Remarks<textarea name="remarks" rows="2">${f("remarks")}</textarea></label>
+    ${uploadField("partners", e)}
     <div class="actions"><button class="btn">${e.id ? "Update Partner" : "Save Partner"}</button>${e.id ? '<button type="button" id="cancel" class="btn ghost">Cancel</button>' : ""}</div>
   </form>
   <h3 style="margin-top:28px">Search Partners</h3>
@@ -150,7 +184,7 @@ function addPartner(v) {
   const q = search.partners.trim();
   $("#res", v).innerHTML = q ? table(partnerCols, D.partners.filter((p) => p.id.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase())), rowBtns("partners")) : `<p class="hint">Type to search existing partners.</p>`;
 }
-const partnerCols = [["id", "Partner ID"], ["name", "Full Name"], ["phone", "Contact"], ["email", "Email"], ["address", "Address"], ["profession", "Profession"], ["pan", "PAN"], ["dob", "DOB"], ["joinDate", "Joined"], ["status", "Status"], ["followUp", "Follow-up"], ["remarks", "Remarks"]].map(([k, h]) => ({ k, h }));
+const partnerCols = [["id", "Partner ID"], ["name", "Full Name"], ["phone", "Contact"], ["email", "Email"], ["address", "Address"], ["profession", "Profession"], ["pan", "PAN"], ["dob", "DOB"], ["joinDate", "Joined"], ["status", "Status"], ["followUp", "Follow-up"], ["remarks", "Remarks"]].map(([k, h]) => ({ k, h })).concat({ h: "Documents", f: (p) => docLinks("partners", p) });
 
 function partners(v) {
   v.innerHTML = `<div class="bar"><input id="q" placeholder="Filter partners…"></div><div id="res"></div>`;
@@ -165,6 +199,7 @@ const bizCols = [
   { h: "Rate", n: 1, f: (b) => (b.commissionRate ? +(b.commissionRate * 100).toFixed(4) + "%" : "") }, { h: "Manual", n: 1, f: (b) => inr(b.manualOverride) },
   { h: "Auto Payout", n: 1, f: (b) => inr(b.autoPayout) }, { h: "Final Payout", n: 1, f: (b) => `<b>${inr(b.finalPayout)}</b>` }, { k: "status", h: "Status" }, { k: "followUp", h: "Follow-up" },
   { k: "paymentDate", h: "Paid On" }, { k: "notes", h: "Notes" }, { h: "Document", f: (b) => (/^https?:\/\//i.test(b.docLink) ? `<a href="${esc(b.docLink)}" target="_blank" rel="noopener">Open</a>` : esc(b.docLink)) },
+  { h: "Uploads", f: (b) => docLinks("businesses", b) },
 ];
 
 function addBusiness(v) {
@@ -187,6 +222,7 @@ function addBusiness(v) {
     <label>Payment Date<input name="paymentDate" type="date" value="${f("paymentDate")}"></label>
     <label class="wide">Document Link<input name="docLink" placeholder="Link to a restricted folder (avoid uploading PAN cards)" value="${f("docLink")}"></label>
     <label class="wide">Notes<textarea name="notes" rows="2">${f("notes")}</textarea></label>
+    ${uploadField("businesses", e)}
     <p class="hint wide" style="grid-column:1/-1;margin:0">Commission rate and auto payout are looked up from Commission Rates by product + company. A manual override, when entered, becomes the final payout.</p>
     <div class="actions"><button class="btn">${e.id ? "Update Business Login" : "Save Business Login"}</button>${e.id ? '<button type="button" id="cancel" class="btn ghost">Cancel</button>' : ""}</div>
   </form>
