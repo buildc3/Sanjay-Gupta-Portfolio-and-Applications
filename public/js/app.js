@@ -75,10 +75,65 @@ function table(cols, rows, actions) {
 }
 // ---------- Documents (stored in a private Supabase Storage bucket via /api/documents) ----------
 const DOC_MAX_MB = 4;
-const docLinks = (kind, r) => (r.docs || []).map((d) => `<a href="#" data-doc="${kind}:${esc(r.id)}:${esc(d.id)}">${esc(d.name)}</a>`).join("<br>");
+const canPreview = (d) => d.type === "application/pdf" || d.type?.startsWith("image/");
+const fileSize = (n) => (n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
+const fileIcon = (d) => (d.type?.startsWith("image/") ? "🖼️" : d.type === "application/pdf" ? "📕" : "📄");
+function docItem(kind, id, d, removable) {
+  const ref = `${kind}:${esc(id)}:${esc(d.id)}`;
+  return `<div class="doc"><span class="docicon">${fileIcon(d)}</span><span class="docname">${esc(d.name)}<small>${fileSize(d.size || 0)}</small></span>
+    <span class="docbtns">${canPreview(d) ? `<button type="button" class="btn ghost sm" data-preview="${ref}">Preview</button>` : ""}<button type="button" class="btn ghost sm" data-download="${ref}">Download</button>${removable ? `<button type="button" class="btn danger sm" data-deldoc="${ref}">Remove</button>` : ""}</span></div>`;
+}
 // No name attribute on the file input, so files stay out of the JSON form body and are uploaded separately after save
 const uploadField = (kind, e) => `<label class="wide">Upload Documents<input type="file" class="docUpload" multiple accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"><span class="hint">PDF, JPG, PNG or Word files, up to ${DOC_MAX_MB} MB each.</span></label>
-  ${e.docs?.length ? `<div class="wide" style="grid-column:1/-1"><small class="hint">Uploaded documents</small>${e.docs.map((d) => `<div>${docLinks(kind, { id: e.id, docs: [d] })} <button type="button" class="btn danger sm" data-deldoc="${kind}:${esc(e.id)}:${esc(d.id)}">Remove</button></div>`).join("")}</div>` : ""}`;
+  ${e.docs?.length ? `<div class="wide docs"><small class="hint">Uploaded documents</small>${e.docs.map((d) => docItem(kind, e.id, d, true)).join("")}</div>` : ""}`;
+
+// In-page preview: the file is fetched from its short-lived signed URL and shown from a local blob URL
+async function previewDoc(kind, id, docId) {
+  const d = D?.[kind].find((r) => r.id === id)?.docs?.find((x) => x.id === docId); if (!d) return;
+  const m = document.createElement("div"); m.className = "modal";
+  m.innerHTML = `<div class="modalbox"><div class="modalhead"><b>${esc(d.name)}</b><span><button class="btn ghost sm" data-download="${kind}:${esc(id)}:${esc(docId)}">Download</button> <button class="btn ghost sm" data-close>Close</button></span></div><div class="modalbody"><p class="hint">Loading…</p></div></div>`;
+  let objUrl;
+  const close = () => { m.remove(); if (objUrl) URL.revokeObjectURL(objUrl); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => e.key === "Escape" && close();
+  m.addEventListener("click", (e) => (e.target === m || "close" in e.target.dataset) && close());
+  document.addEventListener("keydown", onKey); document.body.append(m);
+  try {
+    const { url } = await api(`documents/${kind}/${id}/${docId}`);
+    const res = await fetch(url); if (!res.ok) throw new Error("Could not load the file");
+    objUrl = URL.createObjectURL(new Blob([await res.blob()], { type: d.type }));
+    $(".modalbody", m).innerHTML = d.type.startsWith("image/") ? `<img src="${objUrl}" alt="${esc(d.name)}">` : `<iframe src="${objUrl}" title="${esc(d.name)}"></iframe>`;
+  } catch (err) { $(".modalbody", m).innerHTML = `<p class="over">${esc(err.message)}</p>`; }
+}
+
+async function downloadDoc(kind, id, docId) {
+  const { url } = await api(`documents/${kind}/${id}/${docId}?download=1`);
+  const a = document.createElement("a"); a.href = url; document.body.append(a); a.click(); a.remove();
+}
+
+// ---------- Expandable record list (partners / business logins) ----------
+const openRows = new Set();
+document.addEventListener("toggle", (e) => { const k = e.target.dataset?.row; if (k) e.target.open ? openRows.add(k) : openRows.delete(k); }, true);
+const STATUS_TONE = { Active: "ok", Approved: "ok", Paid: "ok", Prospect: "info", Lead: "info", Submitted: "info", "Under Process": "info", "Documents Pending": "warn", "On Hold": "warn", Rejected: "bad" };
+const statusPill = (st) => (st ? `<span class="status ${STATUS_TONE[st] || ""}">${esc(st)}</span>` : "");
+const SUMMARY = {
+  partners: (p) => [`<b>${esc(p.name)}</b><small>${esc(p.id)}${p.profession ? " · " + esc(p.profession) : ""}</small>`, `${esc(p.phone) || "—"}<small>${esc(p.email)}</small>`, statusPill(p.status)],
+  businesses: (b) => [`<b>${esc(b.customer)}</b><small>${esc(b.id)} · ${esc(b.partnerName || b.partnerId)}</small>`, `${esc(b.product)}<small>${esc(b.company)}</small>`, `${inr(b.amount)}<small>Payout ${inr(b.finalPayout) || "—"}</small>`, statusPill(b.status)],
+};
+
+function recordList(kind, rows) {
+  if (!rows.length) return `<p class="hint">No records found.</p>`;
+  const cols = { partners: partnerCols, businesses: bizCols }[kind];
+  return `<p class="hint count">${rows.length} ${rows.length === 1 ? "record" : "records"} · click a row for full details</p><div class="records">${rows.map((r) => {
+    const key = `${kind}:${esc(r.id)}`, docs = r.docs || [];
+    return `<details class="rec" data-row="${key}" ${openRows.has(`${kind}:${r.id}`) ? "open" : ""}>
+      <summary><div class="sum ${kind}">${SUMMARY[kind](r).map((c) => `<div>${c}</div>`).join("")}<div class="clip">${docs.length ? `<span class="pill" title="${docs.length} document${docs.length > 1 ? "s" : ""}">📎 ${docs.length}</span>` : ""}</div></div><span class="chev" aria-hidden="true"></span></summary>
+      <div class="recbody">
+        <dl class="fields">${cols.map((c) => { const v = c.f ? c.f(r) : esc(r[c.k]); return `<div><dt>${c.h}</dt><dd>${v === "" || v == null ? '<span class="hint">—</span>' : v}</dd></div>`; }).join("")}</dl>
+        <div class="docs"><h4>Documents</h4>${docs.length ? docs.map((d) => docItem(kind, r.id, d, false)).join("") : '<p class="hint">No documents uploaded.</p>'}</div>
+        <div class="actions">${rowBtns(kind)(r)}</div>
+      </div></details>`;
+  }).join("")}</div>`;
+}
 
 async function uploadDocs(kind, id, files, token) {
   const failed = [];
@@ -94,12 +149,9 @@ async function uploadDocs(kind, id, files, token) {
 const rowBtns = (kind) => (r) => `<button class="btn ghost sm" data-edit="${kind}:${esc(r.id)}">Edit</button> <button class="btn danger sm" data-del="${kind}:${esc(r.id)}">Delete</button>`;
 
 document.addEventListener("click", async (e) => {
-  const ed = e.target.dataset?.edit, del = e.target.dataset?.del, doc = e.target.dataset?.doc, delDoc = e.target.dataset?.deldoc;
-  if (doc) {
-    e.preventDefault(); const [kind, id, docId] = doc.split(":");
-    const win = window.open("", "_blank"); // opened before the await so popup blockers allow it
-    try { const r = await api(`documents/${kind}/${id}/${docId}`); if (win) win.location = r.url; else location.href = r.url; } catch (err) { win?.close(); toast(err.message, true); }
-  }
+  const ed = e.target.dataset?.edit, del = e.target.dataset?.del, prev = e.target.dataset?.preview, dl = e.target.dataset?.download, delDoc = e.target.dataset?.deldoc;
+  if (prev) previewDoc(...prev.split(":"));
+  if (dl) downloadDoc(...dl.split(":")).catch((err) => toast(err.message, true));
   if (delDoc) {
     const [kind, id, docId] = delDoc.split(":");
     if (!confirm("Remove this document? It is deleted from storage.")) return;
@@ -182,14 +234,14 @@ function addPartner(v) {
   if (!D) { $("#res", v).innerHTML = gateHTML("Searching existing partners shows stored data."); bindGate(v); return; }
   bindSearch("partners", v);
   const q = search.partners.trim();
-  $("#res", v).innerHTML = q ? table(partnerCols, D.partners.filter((p) => p.id.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase())), rowBtns("partners")) : `<p class="hint">Type to search existing partners.</p>`;
+  $("#res", v).innerHTML = q ? recordList("partners", D.partners.filter((p) => p.id.toLowerCase().includes(q.toLowerCase()) || p.name.toLowerCase().includes(q.toLowerCase()))) : `<p class="hint">Type to search existing partners.</p>`;
 }
-const partnerCols = [["id", "Partner ID"], ["name", "Full Name"], ["phone", "Contact"], ["email", "Email"], ["address", "Address"], ["profession", "Profession"], ["pan", "PAN"], ["dob", "DOB"], ["joinDate", "Joined"], ["status", "Status"], ["followUp", "Follow-up"], ["remarks", "Remarks"]].map(([k, h]) => ({ k, h })).concat({ h: "Documents", f: (p) => docLinks("partners", p) });
+const partnerCols = [["id", "Partner ID"], ["name", "Full Name"], ["phone", "Contact"], ["email", "Email"], ["address", "Address"], ["profession", "Profession"], ["pan", "PAN"], ["dob", "DOB"], ["joinDate", "Joined"], ["status", "Status"], ["followUp", "Follow-up"], ["remarks", "Remarks"]].map(([k, h]) => ({ k, h }));
 
 function partners(v) {
   v.innerHTML = `<div class="bar"><input id="q" placeholder="Filter partners…"></div><div id="res"></div>`;
   bindSearch("partners", v);
-  $("#res", v).innerHTML = table(partnerCols, D.partners.filter((p) => matches(p, search.partners)), rowBtns("partners"));
+  $("#res", v).innerHTML = recordList("partners", D.partners.filter((p) => matches(p, search.partners)));
 }
 
 // ---------- Add / search business ----------
@@ -197,9 +249,8 @@ const bizCols = [
   { k: "id", h: "Login ID" }, { k: "partnerId", h: "Partner ID" }, { k: "partnerName", h: "Partner" }, { k: "customer", h: "Customer" }, { k: "loginDate", h: "Login Date" }, { k: "month", h: "Month" },
   { k: "product", h: "Product" }, { k: "company", h: "Company" }, { h: "Amount", n: 1, f: (b) => inr(b.amount) }, { k: "term", h: "Term (Yrs)", n: 1 }, { k: "payoutMode", h: "Mode" },
   { h: "Rate", n: 1, f: (b) => (b.commissionRate ? +(b.commissionRate * 100).toFixed(4) + "%" : "") }, { h: "Manual", n: 1, f: (b) => inr(b.manualOverride) },
-  { h: "Auto Payout", n: 1, f: (b) => inr(b.autoPayout) }, { h: "Final Payout", n: 1, f: (b) => `<b>${inr(b.finalPayout)}</b>` }, { k: "status", h: "Status" }, { k: "followUp", h: "Follow-up" },
-  { k: "paymentDate", h: "Paid On" }, { k: "notes", h: "Notes" }, { h: "Document", f: (b) => (/^https?:\/\//i.test(b.docLink) ? `<a href="${esc(b.docLink)}" target="_blank" rel="noopener">Open</a>` : esc(b.docLink)) },
-  { h: "Uploads", f: (b) => docLinks("businesses", b) },
+  { h: "Auto Payout", n: 1, f: (b) => inr(b.autoPayout) }, { h: "Final Payout", n: 1, f: (b) => `<b>${inr(b.finalPayout)}</b>` }, { h: "Status", f: (b) => statusPill(b.status) }, { k: "followUp", h: "Follow-up" },
+  { k: "paymentDate", h: "Paid On" }, { k: "notes", h: "Notes" }, { h: "Document Link", f: (b) => (/^https?:\/\//i.test(b.docLink) ? `<a href="${esc(b.docLink)}" target="_blank" rel="noopener">Open</a>` : esc(b.docLink)) },
 ];
 
 function addBusiness(v) {
@@ -232,14 +283,14 @@ function addBusiness(v) {
   if (!D) { $("#res", v).innerHTML = gateHTML("Searching existing business logins shows stored data."); bindGate(v); return; }
   bindSearch("businesses", v);
   const q = search.businesses.trim().toLowerCase();
-  $("#res", v).innerHTML = q ? table(bizCols, D.businesses.filter((b) => [b.id, b.partnerId, b.partnerName, b.customer].some((x) => String(x).toLowerCase().includes(q))), rowBtns("businesses")) : `<p class="hint">Type to search existing cases.</p>`;
+  $("#res", v).innerHTML = q ? recordList("businesses", D.businesses.filter((b) => [b.id, b.partnerId, b.partnerName, b.customer].some((x) => String(x).toLowerCase().includes(q)))) : `<p class="hint">Type to search existing cases.</p>`;
 }
 
 function businesses(v) {
   const statuses = LISTS.BUSINESS_STATUS;
   v.innerHTML = `<div class="bar"><input id="q" placeholder="Filter by partner, company, month, status, product…"></div><div id="res"></div>`;
   bindSearch("businesses", v);
-  $("#res", v).innerHTML = table(bizCols, D.businesses.filter((b) => matches(b, search.businesses)), rowBtns("businesses"));
+  $("#res", v).innerHTML = recordList("businesses", D.businesses.filter((b) => matches(b, search.businesses)));
 }
 
 // ---------- Commission rates ----------

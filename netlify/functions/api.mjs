@@ -81,7 +81,9 @@ async function handleDocuments(req, store, authed, [kind, id, docId]) {
   if (!doc) return json({ error: "Document not found" }, 404);
 
   if (req.method === "GET") {
-    const { data, error } = await sb.storage.from(DOC_BUCKET).createSignedUrl(doc.path, 60, { download: doc.name });
+    // ?download=1 forces a file download; otherwise the URL serves the file inline for previewing
+    const download = new URL(req.url).searchParams.has("download");
+    const { data, error } = await sb.storage.from(DOC_BUCKET).createSignedUrl(doc.path, 60, download ? { download: doc.name } : undefined);
     if (error) return json({ error: error.message }, 502);
     return json({ url: data.signedUrl });
   }
