@@ -14,7 +14,7 @@
 <div id="app" class="hide">
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin:24px 0 8px">
     <h2 style="margin:0">Stock Inward Register <span id="sheetsBadge" class="pill"></span></h2>
-    <div style="display:flex;gap:10px"><button class="btn" id="buyBtn">＋ Buy</button><button class="btn sale" id="saleBtn">− Sale</button></div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn ghost" id="bankBtn">🏦 Bank</button><button class="btn" id="buyBtn">＋ Buy</button><button class="btn sale" id="saleBtn">− Sale</button></div>
   </div>
   <div id="panel"></div>
   <div id="kpis" class="kpis" style="margin-top:18px"></div>
@@ -22,6 +22,9 @@
   <h3 style="margin-top:28px">Stock List <span id="lotCount" class="pill"></span></h3>
   <div class="bar"><input id="q" placeholder="Filter by article…"></div>
   <div id="lots"></div>
+
+  <h3 style="margin-top:28px">Bank Ledger <span id="bankCount" class="pill"></span></h3>
+  <div id="bank"></div>
 
   <h3 style="margin-top:28px">Sales History <span id="saleCount" class="pill"></span></h3>
   <div id="sales"></div>

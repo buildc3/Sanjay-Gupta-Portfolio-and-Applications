@@ -11,6 +11,7 @@ var HEADERS = {
   'Business Logins': ['id','partnerId','partnerName','customer','loginDate','month','product','company','amount','term','payoutMode','commissionRate','manualOverride','autoPayout','finalPayout','status','followUp','paymentDate','notes','docLink','createdAt','updatedAt'],
   'Commission Rates': ['id','product','company','rate','effectiveFrom','effectiveTo','notes','createdAt','updatedAt'],
   'Stock Inward': ['id','article','quantity','purchasePrice','date','sold','remaining','createdAt','updatedAt'],
+  'Bank Ledger': ['id','type','amount','balanceAfter','date','ref','note','createdAt'],
   'Stock Sales': ['id','article','quantity','salePrice','date','costTotal','saleTotal','profit','allocations','createdAt']
 };
 
