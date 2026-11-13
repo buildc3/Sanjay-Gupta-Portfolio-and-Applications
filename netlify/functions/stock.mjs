@@ -3,8 +3,6 @@ import { getStore } from "@netlify/blobs";
 // Stock Inward Register.
 //   lot  (purchase): { id: S0001, article, quantity, purchasePrice, date, sold, remaining }
 //   sale:            { id: T0001, article, quantity, salePrice, date, costTotal, saleTotal, profit, allocations }
-//   bank entry:      { id: B0001, type: opening|adjust|buy|sale, amount (+in / -out), balanceAfter, date, ref, note }
-// The bank balance is the sum of the ledger: a buy takes its cost out, a sale puts its sale total in.
 // A sale draws down the oldest purchase lots first (FIFO) and updates each lot it touches.
 
 const json = (body, status = 200) =>
@@ -34,32 +32,18 @@ async function mirror(sheet, record) {
 
 async function loadAll(store) {
   const out = {};
-  for (const name of ["lots", "sales", "bank"]) {
+  for (const name of ["lots", "sales"]) {
     const { blobs } = await store.list({ prefix: name + "/" });
     const rows = await Promise.all(blobs.map((b) => store.get(b.key, { type: "json" })));
     out[name] = rows.filter(Boolean);
   }
   out.lots.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   out.sales.sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
-  out.bank.sort((a, b) => b.id.localeCompare(a.id)); // newest first
   return out;
 }
 
-const sumSheets = (list) => (list.every((s) => s.ok) ? { ok: true } : list.every((s) => s.skipped) ? { skipped: true } : { ok: false, error: list.find((s) => s.error)?.error });
-
 const nextId = (rows, prefix, pad) =>
   prefix + String(rows.reduce((m, r) => Math.max(m, parseInt(r.id.slice(prefix.length), 10) || 0), 0) + 1).padStart(pad, "0");
-
-const balanceOf = (bank) => money(bank.reduce((t, e) => t + e.amount, 0));
-
-// Record one bank movement and return the entry (with the balance after it).
-async function addBank(store, bank, { type, amount, date, ref = "", note = "" }) {
-  const now = new Date().toISOString();
-  const entry = { id: nextId(bank, "B", 4), type, amount: money(amount), balanceAfter: money(balanceOf(bank) + amount), date, ref, note, createdAt: now };
-  await store.setJSON(`bank/${entry.id}`, entry);
-  bank.unshift(entry);
-  return entry;
-}
 
 function available(lots) {
   const map = new Map();
@@ -82,26 +66,12 @@ export default async (req) => {
   const action = new URL(req.url).pathname.replace(/^\/(\.netlify\/functions\/stock|api\/stock)\/?/, "").split("/").filter(Boolean)[0] || "";
   const data = await loadAll(store);
 
-  const bankState = () => ({ set: data.bank.length > 0, balance: balanceOf(data.bank), entries: data.bank });
-  if (req.method === "GET") return json({ lots: data.lots, sales: data.sales, bank: bankState(), available: available(data.lots), googleSheets: !!process.env.GOOGLE_SCRIPT_URL });
+  if (req.method === "GET") return json({ ...data, available: available(data.lots), googleSheets: !!process.env.GOOGLE_SCRIPT_URL });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   let b;
   try { b = await req.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
   const now = new Date().toISOString();
-
-  if (action === "bank") {
-    // First call sets the opening balance. After that, "balance" is the corrected true balance
-    // and the difference is booked as an adjustment so the ledger still adds up.
-    const target = Number(b.balance);
-    if (b.balance === "" || b.balance == null || !Number.isFinite(target)) return json({ error: "Bank balance must be a number" }, 400);
-    const date = validDate(b.date) ? b.date : now.slice(0, 10);
-    const first = data.bank.length === 0;
-    const diff = money(target - balanceOf(data.bank));
-    if (!first && diff === 0) return json({ error: "That is already the current balance" }, 400);
-    const entry = await addBank(store, data.bank, { type: first ? "opening" : "adjust", amount: first ? target : diff, date, note: String(b.note || "").trim() || (first ? "Opening balance" : "Balance correction") });
-    return json({ ok: true, entry, bank: bankState(), sheets: await mirror("Bank Ledger", entry) });
-  }
 
   if (action === "buy") {
     const article = String(b.article || "").trim();
@@ -109,11 +79,6 @@ export default async (req) => {
     if (!positive(b.quantity)) return json({ error: "Quantity must be greater than 0" }, 400);
     if (b.purchasePrice === "" || b.purchasePrice == null || !Number.isFinite(Number(b.purchasePrice)) || Number(b.purchasePrice) < 0) return json({ error: "Purchase Price must be a number" }, 400);
     if (!validDate(b.date)) return json({ error: "Date is required" }, 400);
-
-    if (!data.bank.length) return json({ error: "Set your bank balance first" }, 400);
-    const cost = money(Number(b.quantity) * Number(b.purchasePrice));
-    const balance = balanceOf(data.bank);
-    if (cost > balance) return json({ error: `Not enough bank balance: purchase costs ${cost} but only ${balance} is available` }, 400);
 
     // Reuse the spelling already in the register so "Rice" and "rice" stay one article.
     const known = data.lots.find((l) => same(l.article, article));
@@ -123,9 +88,7 @@ export default async (req) => {
       sold: 0, remaining: round(Number(b.quantity)), createdAt: now, updatedAt: now,
     };
     await store.setJSON(`lots/${lot.id}`, lot);
-    const entry = await addBank(store, data.bank, { type: "buy", amount: -cost, date: b.date, ref: lot.id, note: `Bought ${lot.quantity} × ${lot.article}` });
-    const sheets = [await mirror("Stock Inward", lot), await mirror("Bank Ledger", entry)];
-    return json({ ok: true, lot, entry, bank: bankState(), sheets: sumSheets(sheets) });
+    return json({ ok: true, lot, sheets: await mirror("Stock Inward", lot) });
   }
 
   if (action === "sell") {
@@ -138,7 +101,6 @@ export default async (req) => {
     const qty = round(Number(b.quantity));
     const lots = data.lots.filter((l) => same(l.article, article) && l.remaining > 0);
     const have = round(lots.reduce((s, l) => s + l.remaining, 0));
-    if (!data.bank.length) return json({ error: "Set your bank balance first" }, 400);
     if (!lots.length) return json({ error: "No stock available for that article" }, 400);
     if (qty > have) return json({ error: `Only ${have} available` }, 400);
 
@@ -161,11 +123,9 @@ export default async (req) => {
     await store.setJSON(`sales/${sale.id}`, sale);
     for (const lot of touched) await store.setJSON(`lots/${lot.id}`, lot);
 
-    const entry = await addBank(store, data.bank, { type: "sale", amount: sale.saleTotal, date: b.date, ref: sale.id, note: `Sold ${qty} × ${sale.article}` });
     const sheets = [await mirror("Stock Sales", { ...sale, allocations: allocations.map((a) => `${a.lotId}×${a.quantity}`).join(", ") })];
     for (const lot of touched) sheets.push(await mirror("Stock Inward", lot));
-    sheets.push(await mirror("Bank Ledger", entry));
-    return json({ ok: true, sale, lots: touched, entry, bank: bankState(), sheets: sumSheets(sheets) });
+    return json({ ok: true, sale, lots: touched, sheets: sheets.every((s) => s.ok) ? { ok: true } : sheets.every((s) => s.skipped) ? { skipped: true } : { ok: false, error: sheets.find((s) => s.error)?.error } });
   }
 
   return json({ error: "Not found" }, 404);
