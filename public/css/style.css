@@ -125,3 +125,5 @@ header.site .brand,header.site nav>a,.ddbtn{white-space:nowrap}
   .doc{flex-wrap:wrap}.docbtns{width:100%;justify-content:flex-start}
   .fields{grid-template-columns:repeat(2,minmax(0,1fr))}.recbody{padding:14px}
 }
+.btn.sale{background:linear-gradient(135deg,#ffb86b,#ff7a8a);color:#1d0b10}
+.btn.ghost.sale{background:transparent;color:var(--text)}

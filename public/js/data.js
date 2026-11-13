@@ -12,6 +12,10 @@ async function load() {
   const data = await res.json().catch(() => ({}));
   if (!res.ok) { if (res.status === 401) sessionStorage.removeItem("pm-pass"); throw new Error(data.error || "Request failed"); }
   D = data;
+  try {
+    const r = await fetch("/api/stock", { headers: { "x-passcode": pass } });
+    D.stock = r.ok ? await r.json() : { lots: [], sales: [] };
+  } catch { D.stock = { lots: [], sales: [] }; }
 }
 async function unlock() {
   await load();
@@ -28,6 +32,8 @@ const link = (u) => (/^https?:\/\//i.test(u) ? `<a href="${esc(u)}" target="_bla
 const SECTIONS = () => [
   ["Partners", D.partners, [["id", "Partner ID"], ["name", "Full Name"], ["phone", "Contact"], ["email", "Email"], ["address", "Address"], ["profession", "Profession"], ["pan", "PAN"], ["dob", "DOB"], ["joinDate", "Joined"], ["status", "Status"], ["followUp", "Follow-up"], ["remarks", "Remarks"]]],
   ["Business Logins", D.businesses, [["id", "Login ID"], ["partnerId", "Partner ID"], ["partnerName", "Partner"], ["customer", "Customer"], ["loginDate", "Login Date"], ["month", "Month"], ["product", "Product"], ["company", "Company"], ["amount", "Amount", inr], ["term", "Term (Yrs)"], ["payoutMode", "Mode"], ["commissionRate", "Rate", pct], ["manualOverride", "Manual", inr], ["autoPayout", "Auto Payout", inr], ["finalPayout", "Final Payout", inr], ["status", "Status"], ["followUp", "Follow-up"], ["paymentDate", "Paid On"], ["notes", "Notes"], ["docLink", "Document", link]]],
+  ["Stock List", D.stock.lots, [["id", "Lot"], ["article", "Name of Article"], ["quantity", "Quantity"], ["purchasePrice", "Purchase Price", inr], ["date", "Date"], ["sold", "Sold"], ["remaining", "Available"]]],
+  ["Stock Sales", D.stock.sales, [["id", "Sale"], ["article", "Name of Article"], ["quantity", "Quantity"], ["salePrice", "Sale Price", inr], ["date", "Date"], ["costTotal", "Cost", inr], ["saleTotal", "Sale Total", inr], ["profit", "Profit / Loss", inr]]],
   ["Commission Rates", D.rates, [["id", "ID"], ["product", "Product"], ["company", "Company"], ["rate", "Rate", pct], ["effectiveFrom", "From"], ["effectiveTo", "To"], ["notes", "Notes"]]],
 ];
 

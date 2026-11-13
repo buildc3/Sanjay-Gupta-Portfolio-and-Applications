@@ -9,7 +9,9 @@
 var HEADERS = {
   'Partners': ['id','name','phone','email','address','profession','pan','dob','joinDate','status','followUp','remarks','createdAt','updatedAt'],
   'Business Logins': ['id','partnerId','partnerName','customer','loginDate','month','product','company','amount','term','payoutMode','commissionRate','manualOverride','autoPayout','finalPayout','status','followUp','paymentDate','notes','docLink','createdAt','updatedAt'],
-  'Commission Rates': ['id','product','company','rate','effectiveFrom','effectiveTo','notes','createdAt','updatedAt']
+  'Commission Rates': ['id','product','company','rate','effectiveFrom','effectiveTo','notes','createdAt','updatedAt'],
+  'Stock Inward': ['id','article','quantity','purchasePrice','date','sold','remaining','createdAt','updatedAt'],
+  'Stock Sales': ['id','article','quantity','salePrice','date','costTotal','saleTotal','profit','allocations','createdAt']
 };
 
 function doPost(e) {

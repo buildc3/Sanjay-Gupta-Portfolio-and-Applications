@@ -1,6 +1,6 @@
 // Shared header: Home + "My Applications" dropdown (Partner Management, My Data)
 const path = location.pathname.replace(/\/$/, "") || "/";
-const items = [["/applications/partner-management", "Partner Management", "Partners, business logins, payouts"], ["/my-data", "My Data", "All stored records in one place"]];
+const items = [["/applications/partner-management", "Partner Management", "Partners, business logins, payouts"], ["/applications/stock-register", "Stock Register", "Buy and sell stock, track what is left"], ["/my-data", "My Data", "All stored records in one place"]];
 const inApps = path === "/applications" || items.some(([h]) => h === path);
 const el = document.createElement("header");
 el.className = "site";

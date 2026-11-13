@@ -6,6 +6,21 @@
   node_bundler = "esbuild"
 
 [[redirects]]
+  from = "/api/stock"
+  to = "/.netlify/functions/stock"
+  status = 200
+
+[[redirects]]
+  from = "/api/stock/*"
+  to = "/.netlify/functions/stock/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/applications/stock-register"
+  to = "/stock-register.html"
+  status = 200
+
+[[redirects]]
   from = "/api/*"
   to = "/.netlify/functions/api/:splat"
   status = 200
