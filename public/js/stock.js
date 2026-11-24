@@ -6,7 +6,7 @@ const today = () => { const d = new Date(); return new Date(d - d.getTimezoneOff
 
 let pass = sessionStorage.getItem("pm-pass") || ""; // same key as the other apps: unlock once
 let S = null;       // { lots, sales, available }
-let mode = null;    // "buy" | "sale" | null
+let mode = null;    // "buy" | "sale" | "cash" | "net" | null
 
 function toast(msg, err) {
   const t = $("#toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : "");
@@ -34,7 +34,23 @@ $("#lockForm").addEventListener("submit", async (e) => {
 
 $("#buyBtn").onclick = () => { mode = mode === "buy" ? null : "buy"; renderPanel(); };
 $("#saleBtn").onclick = () => { mode = mode === "sale" ? null : "sale"; renderPanel(); };
+$("#cashBtn").onclick = () => { mode = mode === "cash" ? null : "cash"; renderPanel(); };
+$("#netBtn").onclick = () => { mode = mode === "net" ? null : "net"; renderPanel(); };
 $("#q").oninput = renderLots;
+
+async function remove(path, id, what) {
+  if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
+  try {
+    const r = await api(path, "POST", { id });
+    S = await api(""); render();
+    sheetNote(r.sheets, `Deleted ${id}`);
+  } catch (err) { toast(err.message, true); }
+}
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-del]"); if (!b) return;
+  remove(b.dataset.del === "lot" ? "/delete-buy" : "/delete-sale", b.dataset.id, (b.dataset.del === "lot" ? "purchase " : "sale ") + b.dataset.id);
+});
+const delBtn = (kind) => (r) => `<button class="btn sm danger" data-del="${kind}" data-id="${esc(r.id)}" title="Delete">Delete</button>`;
 
 function sheetNote(s, what) {
   if (s?.skipped) toast(`${what}. Saved to Netlify Blobs (Google Sheets not connected).`);
@@ -48,7 +64,14 @@ function table(cols, rows) {
     .map((r) => `<tr>${cols.map((c) => `<td class="${c.n ? "n" : ""}">${c.f ? c.f(r) : esc(r[c.k])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
 }
 
-function render() { renderPanel(); renderKpis(); renderLots(); renderSales(); }
+function renderMoney() {
+  const m = S.summary;
+  $("#cashBtn").innerHTML = `Cash: <b class="${m.cash < 0 ? "over" : ""}">${inr(m.cash)}</b>`;
+  $("#netBtn").innerHTML = `Net Worth: <b class="${m.netWorth < 0 ? "over" : ""}">${inr(m.netWorth)}</b>`;
+  $("#cashBtn").classList.toggle("ghost", mode !== "cash"); $("#netBtn").classList.toggle("ghost", mode !== "net");
+}
+
+function render() { renderMoney(); renderPanel(); renderKpis(); renderLots(); renderSales(); }
 
 function renderKpis() {
   const inStock = S.lots.reduce((s, l) => s + l.remaining, 0);
@@ -66,6 +89,7 @@ function renderLots() {
     { k: "id", h: "Lot" }, { k: "article", h: "Name of Article" }, { h: "Quantity", n: 1, f: (l) => qty(l.quantity) }, { h: "Purchase Price", n: 1, f: (l) => inr(l.purchasePrice) },
     { k: "date", h: "Date" }, { h: "Sold", n: 1, f: (l) => qty(l.sold) },
     { h: "Available", n: 1, f: (l) => `<b class="${l.remaining === 0 ? "hint" : ""}">${qty(l.remaining)}</b>` },
+    { h: "", f: delBtn("lot") },
   ], rows);
 }
 
@@ -76,13 +100,38 @@ function renderSales() {
     { k: "date", h: "Date" }, { h: "Cost", n: 1, f: (x) => inr(x.costTotal) }, { h: "Sale Total", n: 1, f: (x) => inr(x.saleTotal) },
     { h: "Profit / Loss", n: 1, f: (x) => `<span class="${x.profit < 0 ? "over" : ""}">${inr(x.profit)}</span>` },
     { h: "From lots", f: (x) => esc(x.allocations.map((a) => `${a.lotId}×${qty(a.quantity)}`).join(", ")) },
+    { h: "", f: delBtn("sale") },
   ], S.sales);
 }
 
 function renderPanel() {
   $("#buyBtn").classList.toggle("ghost", mode !== "buy"); $("#saleBtn").classList.toggle("ghost", mode !== "sale");
+  renderMoney();
   const p = $("#panel");
   if (!mode) { p.innerHTML = ""; return; }
+
+  const row = (l, v, cls = "") => `<div style="display:flex;justify-content:space-between;gap:24px;padding:4px 0"><span>${l}</span><b class="${cls}">${v}</b></div>`;
+  if (mode === "net") {
+    const m = S.summary;
+    p.innerHTML = `<div class="card" style="max-width:420px"><h3 style="margin-top:0">Net Worth</h3>
+      ${row("Cash in hand", inr(m.cash), m.cash < 0 ? "over" : "")}${row("Invested in stock (at cost)", inr(m.invested))}
+      <hr style="border:0;border-top:1px solid var(--line);margin:8px 0">${row("Net Worth", inr(m.netWorth), m.netWorth < 0 ? "over" : "")}</div>`;
+    return;
+  }
+  if (mode === "cash") {
+    const m = S.summary;
+    p.innerHTML = `<div class="card" style="max-width:420px"><h3 style="margin-top:0">Cash in hand</h3>
+      ${row("Opening cash", inr(m.openingCash))}${row("− Spent on purchases", inr(m.purchases))}${row("+ Received from sales", inr(m.salesTotal))}
+      <hr style="border:0;border-top:1px solid var(--line);margin:8px 0">${row("Cash balance", inr(m.cash), m.cash < 0 ? "over" : "")}
+      <form id="form" class="f" style="margin-top:12px"><label>Opening cash<input name="openingCash" type="number" step="any" required value="${m.openingCash}"></label>
+      <div class="actions"><button class="btn">Update opening cash</button></div></form></div>`;
+    $("#form").onsubmit = async (e) => {
+      e.preventDefault();
+      try { await api("/cash", "POST", Object.fromEntries(new FormData(e.target))); S = await api(""); render(); toast("Opening cash updated"); }
+      catch (err) { toast(err.message, true); }
+    };
+    return;
+  }
 
   if (mode === "buy") {
     const known = [...new Set(S.lots.map((l) => l.article))];

@@ -14,6 +14,22 @@ const same = (a, b) => a.trim().toLowerCase() === b.trim().toLowerCase();
 const positive = (v) => v !== "" && v != null && Number.isFinite(Number(v)) && Number(v) > 0;
 const validDate = (d) => /^\d{4}-\d{2}-\d{2}$/.test(d || "");
 
+async function mirrorDelete(sheet, id) {
+  const url = process.env.GOOGLE_SCRIPT_URL;
+  if (!url) return { ok: false, skipped: true };
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: JSON.stringify({ secret: process.env.GOOGLE_SCRIPT_SECRET || "", sheet, action: "delete", id }),
+    });
+    const data = await res.json();
+    return { ok: !!data.ok, error: data.error };
+  } catch (e) {
+    return { ok: false, error: String(e.message || e) };
+  }
+}
+
 async function mirror(sheet, record) {
   const url = process.env.GOOGLE_SCRIPT_URL;
   if (!url) return { ok: false, skipped: true };
@@ -37,6 +53,7 @@ async function loadAll(store) {
     const rows = await Promise.all(blobs.map((b) => store.get(b.key, { type: "json" })));
     out[name] = rows.filter(Boolean);
   }
+  out.openingCash = Number((await store.get("settings/cash", { type: "json" }))?.openingCash) || 0;
   out.lots.sort((a, b) => a.date.localeCompare(b.date) || a.id.localeCompare(b.id));
   out.sales.sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id));
   return out;
@@ -57,6 +74,16 @@ function available(lots) {
   return [...map.values()].sort((a, b) => a.article.localeCompare(b.article));
 }
 
+// Cash = opening cash - everything spent on purchases + everything received from sales.
+// Net worth = cash + money still invested in unsold stock (at cost).
+function summary(data) {
+  const purchases = money(data.lots.reduce((s, l) => s + l.quantity * l.purchasePrice, 0));
+  const salesTotal = money(data.sales.reduce((s, x) => s + x.saleTotal, 0));
+  const invested = money(data.lots.reduce((s, l) => s + l.remaining * l.purchasePrice, 0));
+  const cash = money(data.openingCash - purchases + salesTotal);
+  return { openingCash: data.openingCash, purchases, salesTotal, cash, invested, netWorth: money(cash + invested) };
+}
+
 export default async (req) => {
   const passcode = process.env.APP_PASSCODE;
   if (!passcode) return json({ error: "Server not configured: APP_PASSCODE missing" }, 500);
@@ -66,7 +93,7 @@ export default async (req) => {
   const action = new URL(req.url).pathname.replace(/^\/(\.netlify\/functions\/stock|api\/stock)\/?/, "").split("/").filter(Boolean)[0] || "";
   const data = await loadAll(store);
 
-  if (req.method === "GET") return json({ ...data, available: available(data.lots), googleSheets: !!process.env.GOOGLE_SCRIPT_URL });
+  if (req.method === "GET") return json({ ...data, available: available(data.lots), summary: summary(data), googleSheets: !!process.env.GOOGLE_SCRIPT_URL });
   if (req.method !== "POST") return json({ error: "Method not allowed" }, 405);
 
   let b;
@@ -126,6 +153,40 @@ export default async (req) => {
     const sheets = [await mirror("Stock Sales", { ...sale, allocations: allocations.map((a) => `${a.lotId}×${a.quantity}`).join(", ") })];
     for (const lot of touched) sheets.push(await mirror("Stock Inward", lot));
     return json({ ok: true, sale, lots: touched, sheets: sheets.every((s) => s.ok) ? { ok: true } : sheets.every((s) => s.skipped) ? { skipped: true } : { ok: false, error: sheets.find((s) => s.error)?.error } });
+  }
+
+  if (action === "cash") {
+    const v = Number(b.openingCash);
+    if (b.openingCash === "" || b.openingCash == null || !Number.isFinite(v)) return json({ error: "Opening cash must be a number" }, 400);
+    await store.setJSON("settings/cash", { openingCash: money(v), updatedAt: now });
+    return json({ ok: true });
+  }
+
+  // Delete a purchase lot. Refused if part of it was already sold (delete those sales first).
+  if (action === "delete-buy") {
+    const lot = data.lots.find((l) => l.id === b.id);
+    if (!lot) return json({ error: "Purchase not found" }, 404);
+    if (lot.sold > 0) return json({ error: `${lot.id} already has sales against it. Delete those sales first.` }, 400);
+    await store.delete(`lots/${lot.id}`);
+    return json({ ok: true, sheets: await mirrorDelete("Stock Inward", lot.id) });
+  }
+
+  // Delete a sale and put the quantity back into the lots it was drawn from.
+  if (action === "delete-sale") {
+    const sale = data.sales.find((x) => x.id === b.id);
+    if (!sale) return json({ error: "Sale not found" }, 404);
+    const restored = [];
+    for (const a of sale.allocations) {
+      const lot = data.lots.find((l) => l.id === a.lotId);
+      if (!lot) continue;
+      lot.sold = round(Math.max(0, lot.sold - a.quantity)); lot.remaining = round(lot.remaining + a.quantity); lot.updatedAt = now;
+      await store.setJSON(`lots/${lot.id}`, lot);
+      restored.push(lot);
+    }
+    await store.delete(`sales/${sale.id}`);
+    const sheets = [await mirrorDelete("Stock Sales", sale.id)];
+    for (const lot of restored) sheets.push(await mirror("Stock Inward", lot));
+    return json({ ok: true, sheets: sheets.every((s) => s.ok) ? { ok: true } : sheets.every((s) => s.skipped) ? { skipped: true } : { ok: false, error: sheets.find((s) => s.error)?.error } });
   }
 
   return json({ error: "Not found" }, 404);
